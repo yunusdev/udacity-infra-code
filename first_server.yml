@@ -1,0 +1,154 @@
+Description: >
+    Server Configurations for the first infrastructure network
+
+Parameters:
+    EnvironmentName:
+        Description: Environement name
+        Type: String
+    MyLaunchTemplateVersionNumber:
+        Type: String
+        Default: 1
+
+Resources:
+    LBSecurityGroup:
+        Type: AWS::EC2::SecurityGroup
+        Properties:
+            GroupDescription: Allow http to our load balancer
+            VpcId: 
+                Fn::ImportValue: !Sub "${EnvironmentName}-VPCID"
+            SecurityGroupEgress:
+                -   IpProtocol: tcp
+                    FromPort: 80 
+                    ToPort: 80
+                    CidrIp: 0.0.0.0/0
+                -   IpProtocol: tcp
+                    FromPort: 8080 
+                    ToPort: 8080   
+                    CidrIp: 0.0.0.0/0
+                -   IpProtocol: tcp
+                    FromPort: 8080 
+                    ToPort: 8080   
+                    CidrIpv6: "::/0"  
+            SecurityGroupIngress:
+                -   IpProtocol: tcp
+                    FromPort: 80 
+                    ToPort: 80   
+                    CidrIp: 0.0.0.0/0
+            Tags:
+                -   Key: Name 
+                    Value: !Sub ${EnvironmentName} LB Security Group
+
+    WebServerSecurityGroup:
+        Type: AWS::EC2::SecurityGroup
+        Properties:
+            GroupDescription: Allow http to web server
+            VpcId: 
+                Fn::ImportValue: !Sub "${EnvironmentName}-VPCID"
+            SecurityGroupEgress:
+                -   IpProtocol: tcp
+                    FromPort: 0 
+                    ToPort: 65535   
+                    CidrIp: 0.0.0.0/0
+            SecurityGroupIngress:
+                -   IpProtocol: tcp
+                    FromPort: 8080
+                    ToPort: 8080   
+                    CidrIp: 0.0.0.0/0
+                -   IpProtocol: tcp
+                    FromPort: 22
+                    ToPort: 22   
+                    CidrIp: 0.0.0.0/0
+            Tags:
+                -   Key: Name 
+                    Value: !Sub ${EnvironmentName} Web Server Security Group
+
+    WebAppLaunchTemplate:
+        Type: AWS::EC2::LaunchTemplate
+        Properties:
+            LaunchTemplateData:
+                SecurityGroupIds:
+                    -   !GetAtt WebServerSecurityGroup.GroupId
+                UserData: 
+                    Fn::Base64: !Sub |
+                        #!/bin/bash
+                        sudo yum update -y
+                        sudo yum install -y httpd.x86_64
+                        sudo systemctl start httpd.service
+                        sudo systemctl enable httpd.service
+                        echo "Hello pls you too work abeg" > /var/www/html/index.html
+                ImageId: ami-0d5eff06f840b45e9
+                KeyName: ourdemoserverkey
+                InstanceType: t2.micro
+                BlockDeviceMappings:
+                    - DeviceName: "/dev/xvda"
+                      Ebs:
+                        Encrypted: false
+                        DeleteOnTermination: true
+                        VolumeSize: 8
+                        VolumeType: gp2
+    
+    WebAutoScalingGroup:
+        Type: AWS::AutoScaling::AutoScalingGroup
+        Properties:
+            VPCZoneIdentifier:
+                -   Fn::ImportValue: !Sub "${EnvironmentName}-PRIV-NETS"
+            LaunchTemplate:
+                LaunchTemplateId: !Ref WebAppLaunchTemplate
+                Version: !Ref MyLaunchTemplateVersionNumber
+            MinSize: '3'
+            MaxSize: '5'
+            TargetGroupARNs: 
+                -   Ref: WebAppTargetGroup
+            Tags:
+                -   Key: Name
+                    PropagateAtLaunch: true
+                    Value: !Sub ${EnvironmentName}
+
+    WebAppLB:
+        Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+        Properties:
+            Subnets:
+                -   Fn::ImportValue: !Sub "${EnvironmentName}-PUB1-SN"
+                -   Fn::ImportValue: !Sub "${EnvironmentName}-PUB2-SN"
+            SecurityGroups: 
+                -   Ref: LBSecurityGroup
+            Tags:
+                -   Key: Name
+                    Value: !Sub ${EnvironmentName}
+
+    Listener:
+        Type: AWS::ElasticLoadBalancingV2::Listener
+        Properties:
+            DefaultActions:
+                -   Type: forward
+                    TargetGroupArn: !Ref WebAppTargetGroup
+            LoadBalancerArn: !Ref WebAppLB
+            Port: '80'
+            Protocol: HTTP
+
+    ALBListenerRule:
+        Type: AWS::ElasticLoadBalancingV2::ListenerRule
+        Properties:
+            Actions:
+                -   Type: forward
+                    TargetGroupArn: !Ref 'WebAppTargetGroup'
+            Conditions:
+                -   Field: path-pattern
+                    Values: [/]
+            ListenerArn: !Ref 'Listener'
+            Priority: 1               
+
+    WebAppTargetGroup:
+        Type: AWS::ElasticLoadBalancingV2::TargetGroup
+        Properties:
+            HealthCheckIntervalSeconds: 10
+            HealthCheckPath: /
+            HealthCheckProtocol: HTTP
+            HealthCheckTimeoutSeconds: 8
+            HealthyThresholdCount: 2
+            Port: 8080
+            Protocol: HTTP
+            UnhealthyThresholdCount: 5
+            VpcId: 
+                Fn::ImportValue: !Sub "${EnvironmentName}-VPCID"
+
